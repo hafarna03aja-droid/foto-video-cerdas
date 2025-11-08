@@ -1,0 +1,8 @@
+{
+  "name": "Foto Video Cerdas",
+  "description": "An all-in-one application empowering digital marketers, small business owners, and content creators to produce high-quality photo and video advertising materials quickly and efficiently using generative AI.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
