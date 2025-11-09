@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, Type } from '@google/genai';
 import { fileToBase64 } from '../utils/fileUtils';
 import Button from './ui/Button';
 import Card from './ui/Card';
 import Spinner from './ui/Spinner';
-import { WandIcon, DownloadIcon, HeartIcon, DiamondIcon, ImageIcon, CubeIcon, SpotlightIcon, StarsIcon, PillarIcon, NeonIcon, PlanetIcon, WaterDropIcon, FanIcon, ClapperboardIcon, UndoIcon, RedoIcon, VideoIcon } from './icons';
+import { WandIcon, DownloadIcon, HeartIcon, DiamondIcon, ImageIcon, CubeIcon, SpotlightIcon, StarsIcon, PillarIcon, NeonIcon, PlanetIcon, WaterDropIcon, FanIcon, ClapperboardIcon, UndoIcon, RedoIcon, VideoIcon, SparklesIcon } from './icons';
 import { useHistoryState } from '../hooks/useHistoryState';
 import HistorySidebar from './HistorySidebar';
 import PromotionGenerator from './PromotionGenerator';
@@ -42,6 +42,7 @@ export interface EditorState {
     logoPosition: string;
     logoScale: number;
     logoOpacity: number;
+    isSuggestingTextStyles: boolean;
 }
 
 const initialEditorState: EditorState = {
@@ -63,6 +64,7 @@ const initialEditorState: EditorState = {
     logoPosition: 'Pojok kanan bawah',
     logoScale: 15,
     logoOpacity: 100,
+    isSuggestingTextStyles: false,
 };
 
 const ImageUploadBox: React.FC<{
@@ -220,6 +222,7 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
         logoPosition,
         logoScale,
         logoOpacity,
+        isSuggestingTextStyles,
     } = state;
 
     useEffect(() => {
@@ -233,7 +236,7 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
             convertDataUrlToFile(initialSubjectImageUrl, `generated-image-${Date.now()}.jpg`)
                 .then(file => {
                     const imageState = { file, url: URL.createObjectURL(file) };
-                    setState({ ...state, subjectImage: imageState, error: null });
+                    setState({ ...state, subjectImage: imageState, error: null, step: 'upload' });
                 })
                 .catch(err => {
                     console.error("Gagal mengonversi data URL menjadi file:", err);
@@ -355,13 +358,15 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
                 },
             });
             
-            const part = response.candidates?.[0]?.content?.parts?.[0];
+            const imagePart = response.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
 
-            if (part?.inlineData) {
-                const imageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+            if (imagePart?.inlineData) {
+                const imageUrl = `data:${imagePart.inlineData.mimeType};base64,${imagePart.inlineData.data}`;
                 setState({ ...state, finalImageUrl: imageUrl, loading: false, step: 'result' });
             } else {
-                throw new Error('Gagal memproses gambar. Respons AI tidak berisi gambar.');
+                const textPart = response.candidates?.[0]?.content?.parts?.find(p => p.text);
+                const errorMessage = textPart?.text || 'Gagal memproses gambar. Respons AI tidak berisi gambar.';
+                throw new Error(errorMessage);
             }
 
         } catch (err: any) {
@@ -378,6 +383,76 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
     const fontStyles = ['Serif elegan', 'Sans-serif modern', 'Tulisan tangan kasual', 'Skrip formal', 'Gaya Retro'];
     const textPlacements = ['Tengah', 'Tengah atas', 'Tengah bawah', 'Pojok kiri atas', 'Pojok kanan atas', 'Pojok kiri bawah', 'Pojok kanan bawah'];
     const textColors = ['Putih solid', 'Hitam solid', 'Emas', 'Perak', 'Merah cerah', 'Biru elektrik'];
+
+    const handleSuggestTextStyles = async () => {
+        if (!finalImageUrl) {
+            setState({ ...state, error: 'Tidak ada gambar untuk dianalisis.' });
+            return;
+        }
+        setState({ ...state, isSuggestingTextStyles: true, error: null });
+    
+        try {
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY as string });
+    
+            const response = await fetch(finalImageUrl);
+            const blob = await response.blob();
+            const base64Data = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.readAsDataURL(blob);
+                reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
+                reader.onerror = reject;
+            });
+    
+            const imagePart = { inlineData: { data: base64Data, mimeType: blob.type } };
+    
+            const textPrompt = `
+            Analisis gambar ini dari segi komposisi, warna dominan, dan area fokus. Berdasarkan analisis Anda, sarankan penempatan teks, warna teks, dan efek teks yang paling optimal untuk headline dan tagline.
+    
+            Tujuannya adalah untuk memaksimalkan keterbacaan, harmoni visual, dan dampak estetika. Jangan menutupi elemen penting pada gambar.
+    
+            Pilih dari opsi yang tersedia.
+    
+            - Opsi Penempatan: ${textPlacements.join(', ')}
+            - Opsi Warna: ${textColors.join(', ')}
+            - Opsi Efek: ${textEffects.join(', ')}
+    
+            Berikan respons Anda dalam format JSON.
+            `;
+    
+            const textPart = { text: textPrompt };
+    
+            const genResponse = await ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: { parts: [imagePart, textPart] },
+                config: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: Type.OBJECT,
+                        properties: {
+                            placement: { type: Type.STRING, description: 'Penempatan teks yang disarankan.', enum: textPlacements },
+                            color: { type: Type.STRING, description: 'Warna teks yang disarankan.', enum: textColors },
+                            effect: { type: Type.STRING, description: 'Efek teks yang disarankan.', enum: textEffects },
+                        },
+                        required: ['placement', 'color', 'effect'],
+                    },
+                },
+            });
+    
+            const suggestions = JSON.parse(genResponse.text);
+            
+            setState({
+                ...state,
+                textPlacement: suggestions.placement,
+                textColor: suggestions.color,
+                textEffect: suggestions.effect,
+                isSuggestingTextStyles: false,
+            });
+    
+        } catch (err: any) {
+            setState({ ...state, error: err.message || 'Gagal mendapatkan saran AI.', isSuggestingTextStyles: false });
+            console.error(err);
+        }
+    };
 
     const handleApplyText = async () => {
         if (!finalImageUrl) {
@@ -432,12 +507,14 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
                 config: { responseModalities: [Modality.IMAGE] },
             });
 
-            const part = genResponse.candidates?.[0]?.content?.parts?.[0];
-            if (part?.inlineData) {
-                const newImageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+            const newImagePart = genResponse.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+            if (newImagePart?.inlineData) {
+                const newImageUrl = `data:${newImagePart.inlineData.mimeType};base64,${newImagePart.inlineData.data}`;
                 setState({ ...state, finalImageUrl: newImageUrl, loading: false, step: 'finalResult' });
             } else {
-                throw new Error('Gagal menambahkan teks. Respons AI tidak berisi gambar.');
+                const textPart = genResponse.candidates?.[0]?.content?.parts?.find(p => p.text);
+                const errorMessage = textPart?.text || 'Gagal menambahkan teks. Respons AI tidak berisi gambar.';
+                throw new Error(errorMessage);
             }
 
         } catch (err: any) {
@@ -488,12 +565,14 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
                 config: { responseModalities: [Modality.IMAGE] },
             });
 
-            const part = genResponse.candidates?.[0]?.content?.parts?.[0];
-            if (part?.inlineData) {
-                const newImageUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+            const newImagePart = genResponse.candidates?.[0]?.content?.parts?.find(p => p.inlineData);
+            if (newImagePart?.inlineData) {
+                const newImageUrl = `data:${newImagePart.inlineData.mimeType};base64,${newImagePart.inlineData.data}`;
                  setState({ ...state, finalImageUrl: newImageUrl, loading: false, step: 'finalResult' });
             } else {
-                throw new Error('Gagal menambahkan logo. Respons AI tidak berisi gambar.');
+                const textPart = genResponse.candidates?.[0]?.content?.parts?.find(p => p.text);
+                const errorMessage = textPart?.text || 'Gagal menambahkan logo. Respons AI tidak berisi gambar.';
+                throw new Error(errorMessage);
             }
         } catch (err: any) {
             setState({ ...state, error: err.message || 'Terjadi kesalahan saat menambahkan logo.', loading: false, step: 'logo' });
@@ -519,9 +598,7 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
         }
 
         switch (step) {
-            case 'upload':
-            case 'style':
-            case 'productStyle':
+            case 'upload': {
                  const nextDisabled = !subjectImage;
                  const nextStepTarget = subjectImage && backgroundImage ? 'style' : (subjectImage ? 'productStyle' : 'upload');
                 return (
@@ -539,9 +616,51 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
                         </div>
                     </Card>
                 );
+            }
+            case 'style':
+            case 'productStyle': {
+                const StyleButton: React.FC<{ style: Style, icon: React.FC<{className?:string}>, label: string }> = ({ style, icon: Icon, label }) => (
+                    <button onClick={() => handleStyleSelection(style)} className="flex flex-col items-center justify-center space-y-2 p-3 bg-slate-800 hover:bg-slate-700 rounded-lg transition-all text-center">
+                        <div className="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center text-indigo-400">
+                            <Icon className="w-6 h-6" />
+                        </div>
+                        <span className="text-xs font-medium text-slate-300">{label}</span>
+                    </button>
+                );
+                return (
+                    <Card>
+                        <h3 className="text-lg font-semibold text-white mb-2">Langkah 2: Pilih Gaya</h3>
+                        <p className="text-slate-400 mb-6">
+                            {backgroundImage
+                                ? 'Pilih gaya untuk menggabungkan subjek dan latar belakang Anda secara mulus.'
+                                : 'Pilih gaya latar belakang yang akan dibuat AI untuk produk Anda.'
+                            }
+                        </p>
+                        <AspectRatioSelector aspectRatio={aspectRatio} setAspectRatio={(val) => setState({ ...state, aspectRatio: val })} />
+
+                        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-4">
+                            <StyleButton style="professionalCinematic" icon={ClapperboardIcon} label="Sinematik Pro" />
+                            <StyleButton style="minimalist" icon={DiamondIcon} label="Studio Minimalis" />
+                            <StyleButton style="elegant" icon={PillarIcon} label="Elegan & Mewah" />
+                            <StyleButton style="family" icon={HeartIcon} label="Keluarga Hangat" />
+                            <StyleButton style="dramatic" icon={SpotlightIcon} label="Cahaya Dramatis" />
+                            <StyleButton style="fantasy" icon={StarsIcon} label="Fantasi Epik" />
+                            <StyleButton style="neon" icon={NeonIcon} label="Neon Noir" />
+                            <StyleButton style="cosmic" icon={PlanetIcon} label="Kosmik" />
+                            <StyleButton style="aquatic" icon={WaterDropIcon} label="Bawah Air" />
+                            <StyleButton style="deco" icon={FanIcon} label="Art Deco" />
+                        </div>
+                        <CustomStyleInput
+                            customStyle={customStyle}
+                            setCustomStyle={(val) => setState({ ...state, customStyle: val })}
+                            onSubmit={() => handleStyleSelection('custom')}
+                        />
+                    </Card>
+                );
+            }
             case 'processing':
             case 'result':
-            case 'finalResult':
+            case 'finalResult': {
                  const isFinal = step === 'finalResult';
                 return (
                     <Card>
@@ -575,12 +694,20 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
                         </div>
                     </Card>
                 );
-
+            }
             case 'text':
                 return (
                      <Card>
                         <h3 className="text-lg font-semibold text-white mb-2">Langkah 3: Tambah Teks Iklan</h3>
-                        <p className="text-slate-400 mb-6">Tulis headline dan tagline Anda, lalu pilih gaya yang paling sesuai.</p>
+                        <p className="text-slate-400 mb-6">Tulis headline dan tagline Anda, lalu pilih gaya yang paling sesuai. Atau biarkan AI menyarankannya untuk Anda!</p>
+                        
+                        <div className="mb-6">
+                            <Button variant="secondary" onClick={handleSuggestTextStyles} disabled={isSuggestingTextStyles}>
+                                {isSuggestingTextStyles ? <Spinner /> : <SparklesIcon className="w-5 h-5"/>}
+                                <span>{isSuggestingTextStyles ? 'Menganalisis...' : 'Dapatkan Saran Gaya Teks Otomatis'}</span>
+                            </Button>
+                        </div>
+                        
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                             <div>
                                 <label htmlFor="headline" className="block text-sm font-medium text-slate-300">Headline</label>
@@ -650,46 +777,7 @@ const ImageEditor: React.FC<ImageEditorProps> = ({ initialSubjectImageUrl, onVid
                     </Card>
                 );
         }
-
-        const StyleButton: React.FC<{ style: Style, icon: React.FC<{className?:string}>, label: string }> = ({ style, icon: Icon, label }) => (
-            <button onClick={() => handleStyleSelection(style)} className="flex flex-col items-center justify-center space-y-2 p-3 bg-slate-800 hover:bg-slate-700 rounded-lg transition-all text-center">
-                <div className="w-12 h-12 bg-slate-900 rounded-full flex items-center justify-center text-indigo-400">
-                    <Icon className="w-6 h-6" />
-                </div>
-                <span className="text-xs font-medium text-slate-300">{label}</span>
-            </button>
-        );
-
-        return (
-            <Card>
-                <h3 className="text-lg font-semibold text-white mb-2">Langkah 2: Pilih Gaya</h3>
-                <p className="text-slate-400 mb-6">
-                    {backgroundImage
-                        ? 'Pilih gaya untuk menggabungkan subjek dan latar belakang Anda secara mulus.'
-                        : 'Pilih gaya latar belakang yang akan dibuat AI untuk produk Anda.'
-                    }
-                </p>
-                <AspectRatioSelector aspectRatio={aspectRatio} setAspectRatio={(val) => setState({ ...state, aspectRatio: val })} />
-
-                <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-4">
-                    <StyleButton style="professionalCinematic" icon={ClapperboardIcon} label="Sinematik Pro" />
-                    <StyleButton style="minimalist" icon={DiamondIcon} label="Studio Minimalis" />
-                    <StyleButton style="elegant" icon={PillarIcon} label="Elegan & Mewah" />
-                    <StyleButton style="family" icon={HeartIcon} label="Keluarga Hangat" />
-                    <StyleButton style="dramatic" icon={SpotlightIcon} label="Cahaya Dramatis" />
-                    <StyleButton style="fantasy" icon={StarsIcon} label="Fantasi Epik" />
-                    <StyleButton style="neon" icon={NeonIcon} label="Neon Noir" />
-                    <StyleButton style="cosmic" icon={PlanetIcon} label="Kosmik" />
-                    <StyleButton style="aquatic" icon={WaterDropIcon} label="Bawah Air" />
-                    <StyleButton style="deco" icon={FanIcon} label="Art Deco" />
-                </div>
-                 <CustomStyleInput
-                    customStyle={customStyle}
-                    setCustomStyle={(val) => setState({ ...state, customStyle: val })}
-                    onSubmit={() => handleStyleSelection('custom')}
-                />
-            </Card>
-        );
+        return null;
     };
 
     return (
